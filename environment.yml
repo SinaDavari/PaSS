@@ -1,0 +1,22 @@
+# Core environment for the PASS pipeline scripts (stages 1, 3, evaluation, 7).
+#
+# NOT covered here (installed separately, see the per-stage READMEs):
+#   - Depth Anything 3 / Pi3 / VGGT: install from their upstream repos in their
+#     own environments (each pins its own torch/CUDA stack).
+#   - Blender >= 3.6 (stages 4, 5, 6): install the official binary; scripts run
+#     inside Blender's bundled Python via `blender --background --python ...`.
+#   - YOLOv10 training (stage 7 downstream): https://github.com/THU-MIG/yolov10
+name: pass
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - pyyaml
+  - pip
+  - pip:
+      - opencv-python>=4.8
+      - pymeshlab>=2023.12
+      - open3d>=0.18
+      - trimesh>=4.0

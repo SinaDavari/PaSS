@@ -1,0 +1,878 @@
+diff --git a/DataGenerator.py b/DataGenerator.py
+index be30ee8..2fb47c5 100644
+--- a/DataGenerator.py
++++ b/DataGenerator.py
+@@ -1,19 +1,18 @@
++import os
++import bpy
++import yaml
+ import math
++import json
+ import random
+-import yaml
+ import pickle
+-import os
+ import logging
+-import os
+ import zoneinfo
+-import bpy
+ import bpy_extras
+-import json
+ from pathlib import Path
+ from mathutils import Vector
+ from datetime import datetime, timezone
+ 
+-# Your current timestamp in UTC
++# Current timestamp in UTC
+ timestamp_utc = datetime.now(timezone.utc)
+ # Define the EDT timezone
+ edt_timezone = zoneinfo.ZoneInfo('America/New_York')
+@@ -21,7 +20,6 @@ edt_timezone = zoneinfo.ZoneInfo('America/New_York')
+ timestamp_edt = timestamp_utc.astimezone(edt_timezone)
+ timestamp = timestamp_edt.strftime('%y-%m-%d-%H-%M')
+ 
+-
+ Code_dir = Path(os.getcwd())
+ # Set up logging
+ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+@@ -40,7 +38,6 @@ logger.info('Loading configuration file.')
+ 
+ logger.info('Starting data generation process.')
+ 
+-
+ "Read config and user inputs"
+ # Read config yamlfile
+ # os.chdir(Code_dir)
+@@ -48,7 +45,7 @@ with open(Code_dir / "config.yaml", "r") as yamlfile:
+     config = yaml.load(yamlfile, Loader=yaml.FullLoader)
+ 
+ # Setup directories
+-Dataset_dir = Code_dir / 'Dataset'
++Dataset_dir = Code_dir / 'Dataset' / 'large1_5'
+ Dataset_dir.mkdir(parents=True, exist_ok=True)
+ Avatar_dir = Code_dir / 'Avatars'
+ Scene_dir = Code_dir / 'Scenes'
+@@ -60,12 +57,23 @@ empty_dir = Code_dir / 'Empty.blend'
+ Number_of_Workers = int(config['Number_of_Workers'])
+ 
+ # Camera prameters
+-Camera_Radius = int(random.gauss(int(config['Camera_Radius']), int(config['Camera_Radius'])/3))
+-if Camera_Radius < 2: Camera_Radius = 2
++Camera_Radius = random.gauss(float(config['Camera_Radius']), float(config['Camera_Radius'])/3)
++if Camera_Radius < 1.5: Camera_Radius = 1.5
+ Iterations_Avatar_Location_Randomization = int(config['Iterations_Avatar_Location_Randomization'])
+ Iterations_Lighting_Randomization = int(config['Iterations_Lighting_Randomization'])
+ Number_of_Image_Sequences =  int(config['Number_of_Image_Sequences'])
+-Drone_View = config['Drone_View']
++# Drone_View = config['Drone_View']
++Debug_Save_Blend = config.get('Debug_Save_Blend', False)
++
++# Lighting thresholds
++Sun_Intensity_Min = float(config.get('Sun_Intensity_Min', 0.25))
++Sun_Intensity_Max = float(config.get('Sun_Intensity_Max', 0.75))
++Background_Strength_Min = float(config.get('Background_Strength_Min', 0.25))
++Background_Strength_Max = float(config.get('Background_Strength_Max', 0.75))
++Sun_State_Min = float(config.get('Sun_State_Min', 0.2))
++Sun_State_Max = float(config.get('Sun_State_Max', 0.75))
++Sun_Elevation_Min = float(config.get('Sun_Elevation_Min', 0.25))
++Sun_Elevation_Max = float(config.get('Sun_Elevation_Max', 0.75))
+ 
+ # Avatars path
+ avatar_paths = [Avatar_dir / avatar for avatar in os.listdir(Avatar_dir) if '.blend' in avatar]
+@@ -78,7 +86,6 @@ scene = bpy.context.scene
+ camera = bpy.context.scene.camera
+ 
+ 
+-
+ """
+ Setup GPU in Blender
+ """
+@@ -91,7 +98,7 @@ logger.info(f'Available devices are {prefs.get_devices_for_type("CUDA").__str__(
+ for device in devices:
+     device.use = True # enable any available GPU and CPU
+     logger.info(f'{device["name"]}, use: {device["use"]}')    
+-    
++
+ 
+ """
+ Functions
+@@ -121,6 +128,27 @@ def camera_coord_to_pixel(cam_coord, render_size):
+         cam_coord.z
+     ]
+ 
++
++def save_debug_blend_file(name_tag, output_dir):
++    """Save the current blend file for debugging purposes."""
++    if not Debug_Save_Blend:
++        return
++    
++    # Create debug directory if it doesn't exist
++    debug_dir = Path(output_dir) / 'Debug_Blend_Files'
++    debug_dir.mkdir(parents=True, exist_ok=True)
++    
++    # Create a descriptive filename
++    blend_filename = f'{name_tag}.blend'
++    blend_path = debug_dir / blend_filename
++    
++    # Save the blend file
++    try:
++        bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))
++        logger.info(f'Debug blend file saved: {blend_path}')
++    except Exception as e:
++        logger.error(f'Failed to save debug blend file: {str(e)}')
++
+ "New Camera Function"
+ 
+ def new_camera(focal_len=20):
+@@ -141,6 +169,137 @@ def new_camera(focal_len=20):
+     camera = bpy.context.scene.camera
+ 
+ 
++"Floor boundary checker"
++
++def is_point_on_floor(point_xy, floor_objects):
++    """
++    Check if a 2D point (X, Y) projected onto the floor plane lies within the Floor mesh boundary.
++    Uses ray casting from above the floor downward to check if the point is inside.
++    
++    Args:
++        point_xy: Vector or tuple with (x, y) coordinates
++        floor_objects: List of floor mesh objects
++    
++    Returns:
++        bool: True if point is within floor boundary, False otherwise
++    """
++    if not floor_objects:
++        return True  # If no floor, assume valid
++    
++    x, y = point_xy[0], point_xy[1]
++    
++    # Check each floor object
++    for floor_obj in floor_objects:
++        if floor_obj is None:
++            continue
++        if not hasattr(floor_obj, 'type') or floor_obj.type != 'MESH':
++            continue
++        if not hasattr(floor_obj, 'data') or floor_obj.data is None:
++            continue
++        if not hasattr(floor_obj.data, 'vertices') or not floor_obj.data.vertices:
++            continue
++        
++        try:
++            # Get the floor's bounding box to determine a safe height above the floor
++            floor_vertices = [floor_obj.matrix_world @ v.co for v in floor_obj.data.vertices]
++            if not floor_vertices:
++                continue
++            
++            # Get min and max Z of floor
++            floor_z_min = min(v.z for v in floor_vertices)
++            floor_z_max = max(v.z for v in floor_vertices)
++            
++            # Cast a ray from above the floor downward through the projected point
++            # Start from well above the floor
++            ray_start = Vector((x, y, floor_z_max + 10.0))
++            ray_end = Vector((x, y, floor_z_min - 10.0))
++            ray_direction = (ray_end - ray_start).normalized()
++            
++            # Convert to object space
++            ray_start_obj_space = floor_obj.matrix_world.inverted() @ ray_start
++            ray_direction_obj_space = floor_obj.matrix_world.inverted().to_3x3() @ ray_direction
++            
++            # Ray cast downward
++            result = floor_obj.ray_cast(ray_start_obj_space, ray_direction_obj_space)
++            if result[0]:  # Hit the floor mesh
++                # Check if the hit point's X,Y is close to our test point
++                hit_point_world = floor_obj.matrix_world @ result[1]
++                distance_xy = math.sqrt((hit_point_world.x - x)**2 + (hit_point_world.y - y)**2)
++                
++                # If the hit is close to our X,Y coordinates, the point is on the floor
++                if distance_xy < 0.1:  # Allow small tolerance
++                    return True
++        except Exception as e:
++            logger.warning(f'Error checking floor boundary for object {floor_obj.name if hasattr(floor_obj, "name") else "unknown"}: {str(e)}')
++            continue
++    
++    return False  # Point is not on any floor
++
++
++def get_scene_mesh_height():
++    """
++    Calculate the total height (min and max Z) of the scene mesh.
++    Excludes workers, horizon, floor, and helper objects.
++    
++    Returns:
++        tuple: (min_z, max_z, total_height) or (None, None, None) if no scene mesh found
++    """
++    scene_meshes = []
++    for obj in bpy.data.objects:
++        if obj is None:
++            continue
++        if not hasattr(obj, 'type') or obj.type != 'MESH':
++            continue
++        if not hasattr(obj, 'name') or obj.name is None:
++            continue
++        
++        obj_name = obj.name
++        # Check if object should be excluded
++        if ('Armature' in obj_name or 
++            'Horizon' in obj_name or 
++            'Floor' in obj_name or
++            'cam_circle' in obj_name or
++            'crv' in obj_name):
++            continue
++        
++        # Check parent
++        if obj.parent is not None:
++            if hasattr(obj.parent, 'name') and obj.parent.name is not None:
++                if 'Armature' in obj.parent.name:
++                    continue
++        
++        scene_meshes.append(obj)
++    
++    if not scene_meshes:
++        return None, None, None
++    
++    min_z = float('inf')
++    max_z = float('-inf')
++    
++    for obj in scene_meshes:
++        if obj is None or not hasattr(obj, 'data') or obj.data is None:
++            continue
++        if not hasattr(obj.data, 'vertices') or not obj.data.vertices:
++            continue
++        
++        try:
++            vertices = [obj.matrix_world @ v.co for v in obj.data.vertices]
++            if vertices:
++                obj_min_z = min(v.z for v in vertices)
++                obj_max_z = max(v.z for v in vertices)
++                min_z = min(min_z, obj_min_z)
++                max_z = max(max_z, obj_max_z)
++        except Exception as e:
++            logger.warning(f'Error processing mesh {obj.name if hasattr(obj, "name") else "unknown"}: {str(e)}')
++            continue
++    
++    if min_z == float('inf') or max_z == float('-inf'):
++        return None, None, None
++    
++    total_height = max_z - min_z
++    return min_z, max_z, total_height
++
++
+ "Oclussion detector for workers with bones"
+ 
+ def occlusion_detector(target_arm, origin):
+@@ -590,8 +749,6 @@ def render_setting(scene=bpy.context.scene):
+ 
+ 
+ "Rendering Function"
+-
+-
+ def rendering_random_camera(lighting, itr, camera, target_rig, scene_name, workers_name_list, name_tag):
+     # track target rig by camera
+     camera.constraints.new(type="TRACK_TO")
+@@ -610,14 +767,28 @@ def rendering_random_camera(lighting, itr, camera, target_rig, scene_name, worke
+         except:
+             pass
+ 
++    # --- HEIGHT CALCULATION ---
++    # Get scene mesh height constraints for filtering
++    scene_min_z, scene_max_z, scene_height = get_scene_mesh_height()
++    
++    # Define safe vertical bounds: 0.7m above floor to 95% of ceiling
++    if scene_min_z is not None and scene_max_z is not None:
++        min_h = scene_min_z + 0.7
++        max_h = scene_min_z + (scene_max_z - scene_min_z) * 0.95
++    else:
++        min_h = 0.7  # Fallback if scene analysis fails
++        max_h = 3.65
++    logger.info(f'Applied Height Constraints: Min {min_h:.2f}, Max {max_h:.2f}')
++    
+     # add cam_circle to scene
+     cam_circle_radius = Camera_Radius
++    # center at 1.7m (approx eye level) to favor better viewing angles
++    sphere_center_z = target_rig.location.z + 1.7
+     bpy.ops.mesh.primitive_uv_sphere_add(
+         radius=cam_circle_radius,
+         enter_editmode=False,
+         align='WORLD',
+-        location=(target_rig.location.x, target_rig.location.y,
+-                  target_rig.location.z + cam_circle_radius),
++        location=(target_rig.location.x, target_rig.location.y, sphere_center_z),
+         scale=(1, 1, 1)
+     )
+     # rename and hide the added circle
+@@ -627,57 +798,68 @@ def rendering_random_camera(lighting, itr, camera, target_rig, scene_name, worke
+     cam_circle.hide_viewport = True
+ 
+     # snap camera to random location on camera circle
+-    obj = bpy.data.objects['cam_circle']  # get circle
++    obj = bpy.data.objects['cam_circle']
+     me = obj.data
+     me.calc_loop_triangles()  # calculate triangles on cirlce
+ 
+-    mesh_face = []
+-
+     # loop on camera cirlce surface
++    mesh_face = []
+     for tri in me.loop_triangles:
+         for i in range(3):
+             vert_index = tri.vertices[i]
++            # 1. Get the local coordinate of the vertex
++            local_co = me.vertices[vert_index].co
++            # 2. Calculate the World Position (where it actually is in the room)
++            world_pos = obj.matrix_world @ local_co
++            # 3. Only add to our pool if it's within the 'Safe Height'
++            if min_h <= world_pos.z <= max_h:
++                mesh_face.append(local_co)
++
++    # Emergency fallback: if the sphere is entirely out of bounds, use the top half
++    if not mesh_face:
++        logger.warning("No vertices found in safe height range! Falling back to upper hemisphere.")
++        mesh_face = [v.co for v in me.vertices if v.co.z > 0]
++        
++    # Get Floor objects for boundary checking
++    floor_objects = [o for o in bpy.data.objects if o.type == 'MESH' and 'Floor' in o.name]
++    
++    max_attempts = 1000
++    valid_camera_found = False
++    
++    for attempt in range(max_attempts):
++        rand_mesh_face = random.choice(mesh_face)
++        camera_location = obj.matrix_world @ rand_mesh_face
++        
++        if is_point_on_floor((camera_location.x, camera_location.y), floor_objects):
++            camera.location = camera_location
++            valid_camera_found = True
++            break
++    
++    if not valid_camera_found:
++        logger.warning(f'Could not find valid camera position on floor. Falling back to highest safe vertex.')
++        camera.location = obj.matrix_world @ max(mesh_face, key=lambda co: co.z)
+ 
+-            mesh_face.append(me.vertices[vert_index].co)
+-
+-    # select random location on circle face
+-    rand_mesh_face = random.choice(mesh_face)
+-
+-    # snap camera to random location
+-    camera.location = obj.matrix_world @ rand_mesh_face
+-
+-    # check occlusion and replace camera
++    # check occlusion and replace camera (also check floor boundary and height)
+     occlusion_percentage, _ = occlusion_detector(target_rig, camera)
+-
+-    iter = 0
+-    while occlusion_percentage >= 1 and iter < 30:
+-        # select random location on circle face
++    iter_occ = 0
++    while occlusion_percentage >= 0.98 and iter_occ < 30:
+         rand_mesh_face = random.choice(mesh_face)
++        camera_location = obj.matrix_world @ rand_mesh_face
++        if is_point_on_floor((camera_location.x, camera_location.y), floor_objects):
++            camera.location = camera_location
++            occlusion_percentage, _ = occlusion_detector(target_rig, camera)
++            iter_occ += 1
+ 
+-        # snap camera to random location
+-        camera.location = obj.matrix_world @ rand_mesh_face
+-
+-        occlusion_percentage, _ = occlusion_detector(target_rig, camera)
+-        iter += 1
+-
+-    # set the start and end of the render to the target rig's animation start and finish
++    # Final rendering and export steps:set the start and end of the render to the target rig's animation start and finish
+     keyframes = []
+     anim = target_rig.animation_data
+-    if anim is not None and anim.action is not None:
++    if anim and anim.action:
+         for fcu in anim.action.fcurves:
+-            for keyframe in fcu.keyframe_points:
+-                x, y = keyframe.co
+-                if x not in keyframes:
+-                    keyframes.append((math.ceil(x)))
++            for kb in fcu.keyframe_points:
++                keyframes.append(math.ceil(kb.co[0]))
+     bpy.context.scene.frame_start = min(keyframes)
+     bpy.context.scene.frame_end = max(keyframes)
+ 
+-    # creating name tag
+-    # name_tag = 'RandomCamera_' + \
+-    #     str(itr) + '_' + scene_name + '_' + \
+-    #     target_rig.name.replace('Armature: ', '')
+-    # name_tag = name_tag.replace('RC', f'RC_{itr}_')
+-
+     # creating new folder for new camera location
+     os.chdir(Dataset_dir)
+     os.makedirs(str(name_tag), exist_ok=True)
+@@ -686,164 +868,161 @@ def rendering_random_camera(lighting, itr, camera, target_rig, scene_name, worke
+ 
+     # set the render properties
+     render_setting()
+-
+-    # calling semantic segmentation function
+     Setup_Segmentation(os.path.join(os.getcwd(), 'Semantic Segmentation'))
+-
+-    # calling depth map function
+     Depth_Map_Genrator(os.path.join(os.getcwd(), 'Depth Map'))
++    save_debug_blend_file(name_tag, os.getcwd())
+ 
+     # rendering the animation
+     bpy.ops.render.render(animation=True, write_still=True)
+-
+-    # print('Capturing scene information\n****************************************************\n')
+-    # calling data capture function
+     joint_tracker(lighting, workers_name_list, path=os.getcwd())
+     logger.info('Random camera view rendered for ' + target_rig.name + ' in ' + scene_name + ' scene.')
+ 
+ 
+-def rendering_drone_view(lighting, camera, scene_name, workers_name_list, name_tag):
+-    # get the max and min animations keyframe
+-    workers = [worker for worker in bpy.data.objects if 'Armature' in worker.name]
+-    min_keys = []
+-    max_keys = []
+-    for worker in workers:
+-        keyframes = []
+-        anim = worker.animation_data
+-        if anim is not None and anim.action is not None:
+-            for fcu in anim.action.fcurves:
+-                for keyframe in fcu.keyframe_points:
+-                    x, y = keyframe.co
+-                    if x not in keyframes:
+-                        keyframes.append((math.ceil(x)))
+-        min_keys.append(min(keyframes))
+-        max_keys.append(max(keyframes))
+-    # set the strat and end of the render
+-    bpy.context.scene.frame_start = min(min_keys)
+-    bpy.context.scene.frame_end = max(max_keys)
+-
+-    # get the max and min coordinates of the point-cloud
+-    max_coord_x, max_coord_y, max_coord_z = float(
+-        'inf') * -1, float('inf') * -1, float('inf') * -1
+-    min_coord_x, min_coord_y, min_coord_z = float(
+-        'inf') * 1, float('inf') * 1, float('inf') * 1
+-    for obj in bpy.data.objects:
+-        if obj.type == 'MESH' and obj.name != 'Horizon' and 'Horizon' not in obj.name:
+-            min_mesh_x = min(
+-                [(obj.matrix_world @ v.co).x for v in obj.data.vertices])
+-            min_mesh_y = min(
+-                [(obj.matrix_world @ v.co).y for v in obj.data.vertices])
+-            min_mesh_z = min(
+-                [(obj.matrix_world @ v.co).z for v in obj.data.vertices])
+-
+-            max_mesh_x = max(
+-                [(obj.matrix_world @ v.co).x for v in obj.data.vertices])
+-            max_mesh_y = max(
+-                [(obj.matrix_world @ v.co).y for v in obj.data.vertices])
+-            max_mesh_z = max(
+-                [(obj.matrix_world @ v.co).z for v in obj.data.vertices])
+-
+-            if min_mesh_x < min_coord_x:
+-                min_coord_x = min_mesh_x
+-            if min_mesh_y < min_coord_y:
+-                min_coord_y = min_mesh_y
+-            if min_mesh_z < min_coord_z:
+-                min_coord_z = min_mesh_z
+-
+-            if max_mesh_x > max_coord_x:
+-                max_coord_x = max_mesh_x
+-            if max_mesh_y > max_coord_y:
+-                max_coord_y = max_mesh_y
+-            if max_mesh_z > max_coord_z:
+-                max_coord_z = max_mesh_z
+-
+-    # make a list of curve's control points
+-    coords_list = [
+-        [max_coord_x, max_coord_y, max_mesh_z + 30],
+-        [max_coord_x, min_coord_y, max_mesh_z + 30],
+-        [min_coord_x, min_coord_y, max_mesh_z + 30],
+-        [min_coord_x, max_coord_y, max_mesh_z + 30],
+-        [max_coord_x, max_coord_y, max_mesh_z + 30],
+-        [max_coord_x, min_coord_y, max_mesh_z + 30],
+-        [min_coord_x, min_coord_y, max_mesh_z + 30]
+-    ]
+-
+-    # remove previous curves from scene
+-    bpy.ops.object.select_all(action='DESELECT')
+-    try:
+-        bpy.data.objects['crv'].select_set(True)
+-        if bpy.data.objects['crv'].select_get():
+-            bpy.ops.object.delete(use_global=False, confirm=False)
+-    except:
+-        pass
+-
+-    # make a curve around the point-cloud
+-    crv = bpy.data.curves.new('crv', 'CURVE')
+-    crv.dimensions = '3D'
+-
+-    spline = crv.splines.new(type='NURBS')
+-
+-    # there's already one point by default
+-    spline.points.add(len(coords_list)-1)
+-
+-    # assign the point coordinates to the spline points
+-    for p, new_co in zip(spline.points, coords_list):
+-        p.co = (new_co + [1.0])  # (add nurbs weight)
+-
+-    # make a new object with the curve
+-    obj = bpy.data.objects.new('crv', crv)
+-    bpy.context.collection.objects.link(obj)
+-
+-    # remove previous camera constraints
+-    for c in camera.constraints:
+-        camera.constraints.remove(c)
+-
+-    # add follow_path constraint
+-    camera.constraints.new(type='FOLLOW_PATH')
+-    follow_path = camera.constraints.get("Follow Path")
+-    follow_path.target = bpy.data.objects['crv']
+-    follow_path.use_fixed_location = True
+-
+-    follow_path.offset_factor = 0
+-    follow_path.keyframe_insert(
+-        "offset_factor", frame=bpy.context.scene.frame_start)
+-
+-    follow_path.offset_factor = 1
+-    follow_path.keyframe_insert(
+-        "offset_factor", frame=bpy.context.scene.frame_end)
+-
+-    bpy.ops.constraint.followpath_path_animate(
+-        constraint="Follow Path", owner='OBJECT')
+-
+-    # add "TRACK_TO" constraint to the camera
+-    camera.constraints.new(type="TRACK_TO")
+-    camera.constraints['Track To'].target = bpy.data.objects["Floor"]
+-
+-    # creating name tag
+-    # name_tag = 'DroneCamera_' + scene_name
+-
+-    # creating new folder for new camera location
+-    os.chdir(Dataset_dir)
+-    os.makedirs(str(name_tag))
+-    os.chdir(os.path.join(Dataset_dir , str(name_tag)))
+-    bpy.context.scene.render.filepath = os.path.join(os.getcwd(), 'test')
+-
+-    # set the render properties
+-    render_setting()
+-
+-    # calling semantic segmentation function
+-    Setup_Segmentation(os.path.join(os.getcwd(), 'Semantic Segmentation'))
+-
+-    # calling depth map function
+-    Depth_Map_Genrator(os.path.join(os.getcwd(), 'Depth Map'))
+-
+-    # rendering the animation
+-    bpy.ops.render.render(animation=True, write_still=True)
+-
+-    logger.info('Drone camera view rendered for ' + scene_name + ' scene.')
+-    # print('Capturing scene information\n****************************************************\n')
+-    # calling data capture function
+-    joint_tracker(lighting, workers_name_list, path=os.getcwd())
++# def rendering_drone_view(lighting, camera, scene_name, workers_name_list, name_tag):
++#     # get the max and min animations keyframe
++#     workers = [worker for worker in bpy.data.objects if 'Armature' in worker.name]
++#     min_keys = []
++#     max_keys = []
++#     for worker in workers:
++#         keyframes = []
++#         anim = worker.animation_data
++#         if anim is not None and anim.action is not None:
++#             for fcu in anim.action.fcurves:
++#                 for keyframe in fcu.keyframe_points:
++#                     x, y = keyframe.co
++#                     if x not in keyframes:
++#                         keyframes.append((math.ceil(x)))
++#         min_keys.append(min(keyframes))
++#         max_keys.append(max(keyframes))
++#     # set the strat and end of the render
++#     bpy.context.scene.frame_start = min(min_keys)
++#     bpy.context.scene.frame_end = max(max_keys)
++
++#     # get the max and min coordinates of the point-cloud
++#     max_coord_x, max_coord_y, max_coord_z = float(
++#         'inf') * -1, float('inf') * -1, float('inf') * -1
++#     min_coord_x, min_coord_y, min_coord_z = float(
++#         'inf') * 1, float('inf') * 1, float('inf') * 1
++#     for obj in bpy.data.objects:
++#         if obj.type == 'MESH' and obj.name != 'Horizon' and 'Horizon' not in obj.name:
++#             min_mesh_x = min(
++#                 [(obj.matrix_world @ v.co).x for v in obj.data.vertices])
++#             min_mesh_y = min(
++#                 [(obj.matrix_world @ v.co).y for v in obj.data.vertices])
++#             min_mesh_z = min(
++#                 [(obj.matrix_world @ v.co).z for v in obj.data.vertices])
++
++#             max_mesh_x = max(
++#                 [(obj.matrix_world @ v.co).x for v in obj.data.vertices])
++#             max_mesh_y = max(
++#                 [(obj.matrix_world @ v.co).y for v in obj.data.vertices])
++#             max_mesh_z = max(
++#                 [(obj.matrix_world @ v.co).z for v in obj.data.vertices])
++
++#             if min_mesh_x < min_coord_x:
++#                 min_coord_x = min_mesh_x
++#             if min_mesh_y < min_coord_y:
++#                 min_coord_y = min_mesh_y
++#             if min_mesh_z < min_coord_z:
++#                 min_coord_z = min_mesh_z
++
++#             if max_mesh_x > max_coord_x:
++#                 max_coord_x = max_mesh_x
++#             if max_mesh_y > max_coord_y:
++#                 max_coord_y = max_mesh_y
++#             if max_mesh_z > max_coord_z:
++#                 max_coord_z = max_mesh_z
++
++#     # make a list of curve's control points
++#     coords_list = [
++#         [max_coord_x, max_coord_y, max_mesh_z + 30],
++#         [max_coord_x, min_coord_y, max_mesh_z + 30],
++#         [min_coord_x, min_coord_y, max_mesh_z + 30],
++#         [min_coord_x, max_coord_y, max_mesh_z + 30],
++#         [max_coord_x, max_coord_y, max_mesh_z + 30],
++#         [max_coord_x, min_coord_y, max_mesh_z + 30],
++#         [min_coord_x, min_coord_y, max_mesh_z + 30]
++#     ]
++
++#     # remove previous curves from scene
++#     bpy.ops.object.select_all(action='DESELECT')
++#     try:
++#         bpy.data.objects['crv'].select_set(True)
++#         if bpy.data.objects['crv'].select_get():
++#             bpy.ops.object.delete(use_global=False, confirm=False)
++#     except:
++#         pass
++
++#     # make a curve around the point-cloud
++#     crv = bpy.data.curves.new('crv', 'CURVE')
++#     crv.dimensions = '3D'
++
++#     spline = crv.splines.new(type='NURBS')
++
++#     # there's already one point by default
++#     spline.points.add(len(coords_list)-1)
++
++#     # assign the point coordinates to the spline points
++#     for p, new_co in zip(spline.points, coords_list):
++#         p.co = (new_co + [1.0])  # (add nurbs weight)
++
++#     # make a new object with the curve
++#     obj = bpy.data.objects.new('crv', crv)
++#     bpy.context.collection.objects.link(obj)
++
++#     # remove previous camera constraints
++#     for c in camera.constraints:
++#         camera.constraints.remove(c)
++
++#     # add follow_path constraint
++#     camera.constraints.new(type='FOLLOW_PATH')
++#     follow_path = camera.constraints.get("Follow Path")
++#     follow_path.target = bpy.data.objects['crv']
++#     follow_path.use_fixed_location = True
++
++#     follow_path.offset_factor = 0
++#     follow_path.keyframe_insert(
++#         "offset_factor", frame=bpy.context.scene.frame_start)
++
++#     follow_path.offset_factor = 1
++#     follow_path.keyframe_insert(
++#         "offset_factor", frame=bpy.context.scene.frame_end)
++
++#     bpy.ops.constraint.followpath_path_animate(
++#         constraint="Follow Path", owner='OBJECT')
++
++#     # add "TRACK_TO" constraint to the camera
++#     camera.constraints.new(type="TRACK_TO")
++#     camera.constraints['Track To'].target = bpy.data.objects["Floor"]
++
++#     # creating name tag
++#     # name_tag = 'DroneCamera_' + scene_name
++
++#     # creating new folder for new camera location
++#     os.chdir(Dataset_dir)
++#     os.makedirs(str(name_tag))
++#     os.chdir(os.path.join(Dataset_dir , str(name_tag)))
++#     bpy.context.scene.render.filepath = os.path.join(os.getcwd(), 'test')
++
++#     # set the render properties
++#     render_setting()
++
++#     # calling semantic segmentation function
++#     Setup_Segmentation(os.path.join(os.getcwd(), 'Semantic Segmentation'))
++
++#     # calling depth map function
++#     Depth_Map_Genrator(os.path.join(os.getcwd(), 'Depth Map'))
++
++#     # save debug blend file if debug flag is enabled
++#     save_debug_blend_file(name_tag, os.getcwd())
++
++#     # rendering the animation
++#     bpy.ops.render.render(animation=True, write_still=True)
++
++#     logger.info('Drone camera view rendered for ' + scene_name + ' scene.')
++#     # print('Capturing scene information\n****************************************************\n')
++#     # calling data capture function
++#     joint_tracker(lighting, workers_name_list, path=os.getcwd())
+ 
+ 
+ """
+@@ -903,7 +1082,6 @@ for i in range(Number_of_Image_Sequences):
+     # print('Scene Loaded:\n', scenepath, '\n')
+     
+     
+-    
+     "Generate sky texture"
+     # remove any previous sky_texture
+ 
+@@ -915,7 +1093,12 @@ for i in range(Number_of_Image_Sequences):
+         bg.inputs["Color"], sky_texture.outputs["Color"])
+     sky_texture.sky_type = 'NISHITA'
+ 
+-    bpy.data.worlds['World'].node_tree.nodes['Sky Texture'].sun_intensity = 0.1
++    # Initial lighting values (will be randomized per iteration)
++    # Set to mid-range values initially
++    initial_sun_intensity = (Sun_Intensity_Min + Sun_Intensity_Max) / 2
++    initial_bg_strength = (Background_Strength_Min + Background_Strength_Max) / 2
++    bpy.data.worlds['World'].node_tree.nodes['Sky Texture'].sun_intensity = initial_sun_intensity
++    bpy.data.worlds['World'].node_tree.nodes['Background'].inputs['Strength'].default_value = initial_bg_strength
+ 
+     "Append avatars to scene"
+ 
+@@ -1005,19 +1188,34 @@ for i in range(Number_of_Image_Sequences):
+ 
+             "Randomize lighting condition"
+             lighting = {}
+-            sun_state = random.weibullvariate(1, 1.1)
+-            if sun_state > 1: sun_state = 1
+-            sun_elevation = random.gauss(0.5, 0.5/3)
+-            # if sun_elevation < 0.05: sun_elevation = 0.05
+-            # if sun_elevation > 0.95: sun_elevation = 0.95
+-            if sun_elevation < 0.1: sun_elevation = 0.1
+-            if sun_elevation > 0.9: sun_elevation = 0.9
+-
+-            # bpy.data.worlds['World'].node_tree.nodes['Sky Texture'].air_density = sun_state * 10
+-            bpy.data.worlds['World'].node_tree.nodes['Sky Texture'].air_density = sun_state * 5
++            
++            # Randomize sun_state within thresholds
++            sun_state = random.uniform(Sun_State_Min, Sun_State_Max)
++            sun_state = max(Sun_State_Min, min(Sun_State_Max, sun_state))  # Clamp to ensure within bounds
++            
++            # Randomize sun_elevation within thresholds
++            sun_elevation = random.uniform(Sun_Elevation_Min, Sun_Elevation_Max)
++            sun_elevation = max(Sun_Elevation_Min, min(Sun_Elevation_Max, sun_elevation))  # Clamp to ensure within bounds
++            
++            # Randomize sun_intensity within thresholds
++            sun_intensity = random.uniform(Sun_Intensity_Min, Sun_Intensity_Max)
++            sun_intensity = max(Sun_Intensity_Min, min(Sun_Intensity_Max, sun_intensity))  # Clamp to ensure within bounds
++            
++            # Randomize background strength within thresholds
++            bg_strength = random.uniform(Background_Strength_Min, Background_Strength_Max)
++            bg_strength = max(Background_Strength_Min, min(Background_Strength_Max, bg_strength))  # Clamp to ensure within bounds
++
++            # Apply lighting settings
++            bpy.data.worlds['World'].node_tree.nodes['Sky Texture'].air_density = sun_state * 3
+             bpy.data.worlds['World'].node_tree.nodes['Sky Texture'].sun_elevation = sun_elevation * 1.57
++            bpy.data.worlds['World'].node_tree.nodes['Sky Texture'].sun_intensity = sun_intensity
++            bpy.data.worlds['World'].node_tree.nodes['Background'].inputs['Strength'].default_value = bg_strength
++            
++            # Store lighting values for logging
+             lighting['sun_state'] = sun_state * 10
+             lighting['sun_elevation'] = sun_elevation * 1.57
++            lighting['sun_intensity'] = sun_intensity
++            lighting['background_strength'] = bg_strength
+ 
+             "Add camera to the scene"
+             new_camera(focal_len=random.choice([15, 20, 30, 40]))
+@@ -1031,7 +1229,7 @@ for i in range(Number_of_Image_Sequences):
+            
+             name_tag = 'RC_' + \
+                 str(itr) + '_' + scene_name + '_' + \
+-                target_rig.name.replace('Armature: ', '')
++                target_rig.name.replace('Armature: ', '') + '_' + timestamp
+ 
+             try:
+                 rendering_random_camera(
+@@ -1048,26 +1246,26 @@ for i in range(Number_of_Image_Sequences):
+                 
+ 
+     # render drone view
+-    if Drone_View:
+-        "Add camera to the scene"
+-        new_camera(focal_len=random.choice([15, 20, 30, 40]))
+-        camera = bpy.data.objects['Camera']
+-
+-        name_tag = 'RandomCamera_' + \
+-            str(itr) + '_' + scene_name + '_' + \
+-            target_rig.name.replace('Armature: ', '')
++    # if Drone_View:
++    #     "Add camera to the scene"
++    #     new_camera(focal_len=random.choice([15, 20, 30, 40]))
++    #     camera = bpy.data.objects['Camera']
++
++    #     name_tag = 'RandomCamera_' + \
++    #         str(itr) + '_' + scene_name + '_' + \
++    #         target_rig.name.replace('Armature: ', '') + '_' + timestamp
+         
+-        try:
+-            rendering_drone_view(
+-                lighting=lighting, 
+-                workers_name_list=workers_name_list, 
+-                camera=camera, 
+-                scene_name=scene_name,
+-                name_tag=name_tag)
+-            logger.info(f'Rendering done for {str(name_tag)}')
++    #     try:
++    #         rendering_drone_view(
++    #             lighting=lighting, 
++    #             workers_name_list=workers_name_list, 
++    #             camera=camera, 
++    #             scene_name=scene_name,
++    #             name_tag=name_tag)
++    #         logger.info(f'Rendering done for {str(name_tag)}')
+             
+-        except Exception as e:
+-            logger.error(f'Error in rendering {str(name_tag)}: {str(e)}')
++    #     except Exception as e:
++    #         logger.error(f'Error in rendering {str(name_tag)}: {str(e)}')
+             
+ 
+     bpy.ops.wm.open_mainfile(filepath=empty_dir.as_posix(), display_file_selector=False)
+diff --git a/config.yaml b/config.yaml
+index 14a670f..7ec56e9 100644
+--- a/config.yaml
++++ b/config.yaml
+@@ -1,20 +1,14 @@
+-# Hyperparameters for iterations of data generation
+-Iterations_Avatar_Location_Randomization: 1
+-Iterations_Lighting_Randomization: 1
+-Number_of_Image_Sequences: 1
+-
+-# Hyperparameters for scene setup
+-Camera_Radius: 3
+-Number_of_Workers: 1
+- 
+-# Hyperparameters for rendering type
+-Drone_View: False
+-
+-# Hyperparameters for rendering settings
+-max_bounces: 4                      # Sets the maximum number of light bounces for ray tracing, affecting the realism and computational load.
+-samples: 1024                       # Sets the number of samples per pixel for rendering, affecting image quality and render time.
+-tile_size: 1024                     # Defines the size of render tiles, impacting render efficiency. 
+-adaptive_threshold: 0.001           # Sets the threshold for adaptive sampling, improving efficiency by reducing samples in areas with less noise.
+-resolution_x: 1024                  # Sets the horizontal resolution of the render to 1920 pixels.
+-resolution_y: 1024                  # Sets the vertical resolution of the render to 1920 pixels.
+-Framerate: 500                      # Sets the frames per second for the animation, and the number of frames to skip for each step in animation playback.
++Camera_Radius: 1.5
++Debug_Save_Blend: false
++Drone_View: false
++Framerate: 100
++Iterations_Avatar_Location_Randomization: 10
++Iterations_Lighting_Randomization: 10
++Number_of_Image_Sequences: 1
++Number_of_Workers: 8
++adaptive_threshold: 0.001
++max_bounces: 2
++resolution_x: 640
++resolution_y: 640
++samples: 512
++tile_size: 640

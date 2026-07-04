@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Heavy artifacts — never committed (live on Hugging Face / local storage)
+*.ply
+*.blend
+*.blend1
+*.glb
+*.pt
+*.pth
+*.safetensors
+*.mp4
+*.mov
+*.avi
+*.zip
+outputs/
+6_blendcon/BlendCon/
+runs/
+datasets/
+frames/
+
+# Except: nothing — patches and configs are text and tracked normally
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs and caches
+*.log
+*.cache
+wandb/

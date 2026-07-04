@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper below."
+title: "PASS: Passive-sensing Site Synthesis"
+type: software
+authors:
+  - family-names: Davari
+    given-names: Sina
+repository-code: "https://github.com/SinaDavari/PaSS"
+license: MIT
+preferred-citation:
+  type: article
+  title: >-
+    PASS: Passive-sensing Site Synthesis for site-adaptive synthetic
+    training data generation for construction worker detection
+  # TODO: complete author list, year, volume, pages, DOI upon acceptance
+  authors:
+    - family-names: Davari
+      given-names: Sina
+  journal: "Automation in Construction"
+  year: 2026

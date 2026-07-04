@@ -1,0 +1,10 @@
+# YOLO dataset template for PASS worker detection.
+# Filled in by blendcon_to_yolo.py (WIP); paths are relative to `path`.
+path: /absolute/path/to/dataset
+train: images/train
+val: images/val
+
+# single-class worker detection
+nc: 1
+names:
+  0: worker

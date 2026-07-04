@@ -1,0 +1,33 @@
+# Example per-site configuration for the PASS pipeline.
+# Copy to configs/<your_site>.yaml and edit. Scripts take these values as CLI
+# arguments; this file is the single place to record them per site.
+
+site_name: mysite
+
+# ---- inputs (the only two things PASS needs) --------------------------------
+video: /data/mysite/walkthrough.mp4
+site_height_m: 3.20        # measured on-site with a tape (floor to ceiling/top)
+
+# Optional LiDAR reference. EVALUATION ONLY — not part of the deployment
+# pipeline. If set, 4_scale_registration can derive scale from it and
+# evaluation/ uses it as ground truth.
+lidar_ref: null            # e.g. /data/mysite/lidar/blk_arc_scan.ply
+
+# ---- stage outputs ----------------------------------------------------------
+frames_dir: outputs/mysite/frames
+pointcloud: outputs/mysite/recon/mysite_pointcloud.ply
+mesh: outputs/mysite/recon/mysite_mesh.ply
+blend_scaled: outputs/mysite/scene/mysite.blend
+blend_floor: outputs/mysite/scene/mysite_floor.blend
+
+# ---- stage 1: capture -------------------------------------------------------
+capture:
+  num_frames: 50
+  min_sharpness: 60.0      # variance-of-Laplacian threshold; below = blurry
+
+# ---- stage 5: floor detection -----------------------------------------------
+floor:
+  crop_fraction: 0.3333    # bottom part of the Z-range searched for the floor
+  tolerance_m: 0.10        # +/- inlier band around the RANSAC plane
+  inset_m: 0.30            # inward erosion of the standable area
+  cell_size_m: 0.10        # occupancy-grid resolution for the floor footprint
