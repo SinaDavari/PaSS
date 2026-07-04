@@ -46,6 +46,16 @@ YOLO dataset assembly + detector training
 | 7 | [`7_detection/`](7_detection/) | BlendCon output → per-scenario 2D labels + merged YOLO dataset with a single `dataset.yaml` |
 | — | [`evaluation/`](evaluation/) | **Study only, not part of the pipeline.** Mesh-vs-LiDAR alignment and Accuracy / Completeness / Chamfer / Normal-Consistency / F-score metrics |
 
+## Models and data
+
+- **Trained models** — all 29 trained YOLOv10-s detectors are available on
+  Hugging Face:
+  [`SinaDavari/pass-worker-detection-yolov10s`](https://huggingface.co/SinaDavari/pass-worker-detection-yolov10s).
+- **Real test datasets** — the real, manually annotated test sets gathered
+  from both construction sites and used to evaluate the models are available
+  on Hugging Face:
+  [`SinaDavari/pass-worker-detection-test-sets`](https://huggingface.co/datasets/SinaDavari/pass-worker-detection-test-sets).
+
 ## Design principles
 
 - **Passive sensing only.** The deployment pipeline needs a smartphone video
