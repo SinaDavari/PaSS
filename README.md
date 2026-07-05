@@ -1,4 +1,4 @@
-# PASS — Passive-sensing Site Synthesis
+# PASS: Passive-sensing Site Synthesis
 
 **Site-adaptive synthetic training data generation for construction worker
 detection, from nothing but a smartphone video.**
@@ -60,7 +60,7 @@ YOLO dataset assembly + detector training
 
 - **Passive sensing only.** The deployment pipeline needs a smartphone video
   and a single tape measurement. LiDAR scans (Leica BLK ARC) are used **only
-  as evaluation references** — never as a pipeline input.
+  as evaluation references**; never as a pipeline input.
 - **One measurement, then end-to-end.** Metric scale is fundamentally
   unobservable from monocular imagery, so the user supplies one measured
   height (in meters) up front; everything else is automatic and
@@ -69,6 +69,10 @@ YOLO dataset assembly + detector training
   test sets live on Hugging Face:
   [`SinaDavari/pass-worker-detection-yolov10s`](https://huggingface.co/SinaDavari/pass-worker-detection-yolov10s)
   (29 YOLOv10-s checkpoints from the incremental-augmentation study).
+- **Synthetic data samples on Hugging Face**: 2,000 fully labeled sample images (500 per
+  site × background source, with YOLO labels and segmentation masks) from the
+  PASS-generated synthetic datasets are available on Hugging Face:
+  [`SinaDavari/pass-synthetic-data-samples`](https://huggingface.co/datasets/SinaDavari/pass-synthetic-data-samples).
 
 ## Quickstart
 
