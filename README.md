@@ -69,7 +69,7 @@ YOLO dataset assembly + detector training
   test sets live on Hugging Face:
   [`SinaDavari/pass-worker-detection-yolov10s`](https://huggingface.co/SinaDavari/pass-worker-detection-yolov10s)
   (29 YOLOv10-s checkpoints from the incremental-augmentation study).
-- **Synthetic data samples**: 2,000 fully labeled sample images (500 per
+- **Synthetic data samples on Hugging Face**: 2,000 fully labeled sample images (500 per
   site × background source, with YOLO labels and segmentation masks) from the
   PASS-generated synthetic datasets are available on Hugging Face:
   [`SinaDavari/pass-synthetic-data-samples`](https://huggingface.co/datasets/SinaDavari/pass-synthetic-data-samples).
