@@ -6,11 +6,20 @@ NOT part of the deployment pipeline: LiDAR scans (Leica BLK ARC) are used
 only as evaluation references, to compare the three image-based
 reconstruction methods (DA3 — deployment — vs. VGGT and π³).
 
-Two-step registration (Open3D), replacing the manual Blender overlay:
-  1. 7-DoF point-to-point ICP *with scaling* — recovers the unknown scale of
-     the image-based reconstruction along with a coarse pose
-     (max correspondence distance 1.0 m)
-  2. rigid point-to-plane ICP refinement (max correspondence distance 0.2 m)
+Registration (Open3D), replacing the manual Blender overlay. Two candidate
+initializations are refined and the better final fit is kept automatically:
+  a. identity — wins when both meshes already sit in similar frames
+     (e.g. floor at Z=0, similar orientation)
+  b. global FPFH-feature RANSAC — wins when the frames differ
+Each branch then runs:
+  1. 7-DoF point-to-point ICP *with scaling* — recovers the residual scale
+     of the reconstruction along with the pose (max corr. distance 1.0 m)
+  2. rigid point-to-plane ICP refinement (max corr. distance 0.2 m)
+Winner = highest refinement fitness (tie: lowest inlier RMSE). Assumes
+roughly metric inputs (within ~2x of true scale).
+
+Registration runs on voxel-downsampled copies (--voxel, default 5 cm) for
+robustness and speed; the final transform is applied to the full cloud.
 
 Total transform T = T_refine @ T_coarse is written as JSON (4x4 matrix plus
 a translation / Euler-XYZ rotation / scale decomposition, convenient for
@@ -70,41 +79,100 @@ def main():
                    help="Optional .ply of the aligned prediction "
                         "(input to compute_metrics.py)")
     p.add_argument("--coarse-dist", type=float, default=1.0,
-                   help="Max correspondence distance, step 1 (default 1.0 m)")
+                   help="Max correspondence distance, step 2 (default 1.0 m)")
     p.add_argument("--refine-dist", type=float, default=0.2,
-                   help="Max correspondence distance, step 2 (default 0.2 m)")
+                   help="Max correspondence distance, step 3 (default 0.2 m)")
+    p.add_argument("--voxel", type=float, default=0.05,
+                   help="Voxel size (m) for the downsampled clouds used in "
+                        "registration (default 0.05); the final transform is "
+                        "applied to the full-resolution cloud")
+    p.add_argument("--no-global-init", action="store_true",
+                   help="Skip the FPFH+RANSAC global initialization and "
+                        "start ICP from identity (legacy behavior)")
     args = p.parse_args()
 
     print("Loading data ...")
-    source = load_as_pcd(args.pred)   # reconstruction
-    target = load_as_pcd(args.gt)     # LiDAR
-    print(f"  pred: {len(source.points):,} pts | gt: {len(target.points):,} pts")
+    source_full = load_as_pcd(args.pred)   # reconstruction
+    target_full = load_as_pcd(args.gt)     # LiDAR
+    print(f"  pred: {len(source_full.points):,} pts | "
+          f"gt: {len(target_full.points):,} pts")
 
-    # Step 1: 7-DoF (similarity) ICP — recovers scale + coarse pose.
-    print("Step 1/2: point-to-point ICP with scaling ...")
-    coarse = o3d.pipelines.registration.registration_icp(
-        source, target, max_correspondence_distance=args.coarse_dist,
-        init=np.identity(4),
-        estimation_method=o3d.pipelines.registration.
-        TransformationEstimationPointToPoint(with_scaling=True))
-    print(f"  fitness {coarse.fitness:.4f} | inlier RMSE "
-          f"{coarse.inlier_rmse:.4f} m")
+    # Registration runs on voxel-downsampled clouds: robust, fast, and the
+    # resulting transform is applied to the full-resolution prediction.
+    v = args.voxel
+    source = source_full.voxel_down_sample(v)
+    target = target_full.voxel_down_sample(v)
+    for pc in (source, target):
+        pc.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=v * 2, max_nn=30))
+    print(f"  downsampled @ {v} m: pred {len(source.points):,} | "
+          f"gt {len(target.points):,}")
 
-    # Step 2: rigid point-to-plane refinement on the coarsely aligned source.
-    source.transform(coarse.transformation)
-    if not target.has_normals():
-        target.estimate_normals()
-    if not source.has_normals():
-        source.estimate_normals()
+    # Candidate initializations. Identity wins when the meshes already sit
+    # in similar frames (e.g. both floor-at-Z=0); FPFH+RANSAC wins when they
+    # don't. Both branches are refined and the better final fit is kept —
+    # this replaces the judgment call of the manual "lay the meshes on top
+    # of each other" step.
+    inits = {"identity": np.identity(4)}
+    if not args.no_global_init:
+        print("Global registration candidate (FPFH + RANSAC) ...")
+        fpfh = {}
+        for name, pc in (("src", source), ("tgt", target)):
+            fpfh[name] = o3d.pipelines.registration.compute_fpfh_feature(
+                pc, o3d.geometry.KDTreeSearchParamHybrid(radius=v * 5,
+                                                         max_nn=100))
+        ransac = o3d.pipelines.registration.\
+            registration_ransac_based_on_feature_matching(
+                source, target, fpfh["src"], fpfh["tgt"],
+                mutual_filter=True,
+                max_correspondence_distance=v * 3,
+                estimation_method=o3d.pipelines.registration.
+                TransformationEstimationPointToPoint(False),
+                ransac_n=3,
+                checkers=[
+                    o3d.pipelines.registration.
+                    CorrespondenceCheckerBasedOnEdgeLength(0.9),
+                    o3d.pipelines.registration.
+                    CorrespondenceCheckerBasedOnDistance(v * 3),
+                ],
+                criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(
+                    1_000_000, 0.9999))
+        print(f"  RANSAC fitness {ransac.fitness:.4f} | inlier RMSE "
+              f"{ransac.inlier_rmse:.4f} m")
+        inits["ransac"] = ransac.transformation
 
-    print("Step 2/2: point-to-plane ICP refinement ...")
-    refine = o3d.pipelines.registration.registration_icp(
-        source, target, max_correspondence_distance=args.refine_dist,
-        init=np.identity(4),
-        estimation_method=o3d.pipelines.registration.
-        TransformationEstimationPointToPlane())
-    print(f"  fitness {refine.fitness:.4f} | inlier RMSE "
-          f"{refine.inlier_rmse:.4f} m")
+    def run_icp_branch(init_mat):
+        """7-DoF scale ICP + rigid point-to-plane refine from a given init."""
+        coarse = o3d.pipelines.registration.registration_icp(
+            source, target, max_correspondence_distance=args.coarse_dist,
+            init=init_mat,
+            estimation_method=o3d.pipelines.registration.
+            TransformationEstimationPointToPoint(with_scaling=True))
+        src2 = o3d.geometry.PointCloud(source)   # keep `source` pristine
+        src2.transform(coarse.transformation)
+        refine = o3d.pipelines.registration.registration_icp(
+            src2, target, max_correspondence_distance=args.refine_dist,
+            init=np.identity(4),
+            estimation_method=o3d.pipelines.registration.
+            TransformationEstimationPointToPlane())
+        return coarse, refine
+
+    branches = {}
+    for name, init_mat in inits.items():
+        coarse, refine = run_icp_branch(init_mat)
+        s = np.linalg.norm(
+            (refine.transformation @ coarse.transformation)[:3, 0])
+        print(f"Branch '{name}': coarse fitness {coarse.fitness:.4f} | "
+              f"refine fitness {refine.fitness:.4f}, "
+              f"RMSE {refine.inlier_rmse:.4f} m | scale ~ {s:.4f}")
+        branches[name] = (coarse, refine)
+
+    # Winner: best refinement fitness (tie-broken by lower inlier RMSE).
+    best = max(branches,
+               key=lambda k: (branches[k][1].fitness,
+                              -branches[k][1].inlier_rmse))
+    coarse, refine = branches[best]
+    print(f"Selected init: '{best}'")
 
     total = refine.transformation @ coarse.transformation
     trans, euler, scale = decompose(total)
@@ -119,7 +187,12 @@ def main():
             "rotation_euler_xyz_deg": euler.tolist(),
             "scale_xyz": scale.tolist(),
         },
-        "icp": {
+        "registration": {
+            "voxel_m": args.voxel,
+            "selected_init": best,
+            "branches": {k: {"refine_fitness": b[1].fitness,
+                             "refine_rmse": b[1].inlier_rmse}
+                         for k, b in branches.items()},
             "coarse": {"fitness": coarse.fitness,
                        "inlier_rmse": coarse.inlier_rmse,
                        "max_dist": args.coarse_dist},
@@ -133,10 +206,10 @@ def main():
           f"({trans[0]:.3f}, {trans[1]:.3f}, {trans[2]:.3f}) m")
 
     if args.out_aligned:
-        # `source` already carries T_coarse; apply the refinement on top.
-        source.transform(refine.transformation)
+        # Apply the total transform to the FULL-resolution prediction.
+        source_full.transform(total)
         args.out_aligned.parent.mkdir(parents=True, exist_ok=True)
-        o3d.io.write_point_cloud(str(args.out_aligned), source)
+        o3d.io.write_point_cloud(str(args.out_aligned), source_full)
         print(f"Aligned prediction written: {args.out_aligned}")
         print("Next: compute_metrics.py --pred <aligned> --gt <lidar>")
 
