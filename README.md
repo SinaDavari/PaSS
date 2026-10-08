@@ -6,6 +6,8 @@ detection, from nothing but a smartphone video.**
 Code repository for the paper *"PASS: Passive-sensing Site Synthesis"*
 (submitted to *Automation in Construction*).
 
+![Alt text for image 1](PaSS.png)
+
 PASS turns a short walk-through video of a construction site into a fully
 annotated, site-specific synthetic training dataset — and from it, a
 site-adapted YOLOv10-s worker detector:
