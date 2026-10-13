@@ -43,7 +43,7 @@ def glb_to_ply(glb_path: Path, ply_path: Path, zup: bool = True) -> int:
     the first camera); with zup=True the points are rotated to the pipeline's
     Z-up convention, (x, y, z) -> (x, -z, y), matching Blender's own glTF
     import. Residual tilt (the phone's pitch at recording start) is corrected
-    later by stage 5's RANSAC leveling."""
+    later by stage 4's RANSAC leveling."""
     try:
         import trimesh
     except ImportError:

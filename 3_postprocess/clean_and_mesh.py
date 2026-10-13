@@ -11,7 +11,7 @@ Automates (via the PyMeshLab API) the MeshLab workflow used in the paper:
   5. vertex-color transfer from the cloud onto the new mesh
   6. remove isolated pieces      (MeshLab default: diameter < 10% of bbox diag)
   7. translate so the bounding-box MIN corner sits at (0, 0, 0)
-     (BlendCon's scene convention; stage 5 later refines Z with the true floor)
+     (BlendCon's scene convention; stage 4 later refines Z with the true floor)
      and export as binary PLY with vertex colors
 
 Runs fully headless — no MeshLab GUI needed.
@@ -104,7 +104,7 @@ def main():
     # -- 4. trim low-density Poisson bulges ------------------------------------
     # Screened Poisson closes open scan boundaries with large low-density
     # "balloon" bubbles that inflate the bbox (and would corrupt the
-    # height-based scaling in stage 4). Poisson stores per-vertex density as
+    # height-based scaling in stage 5). Poisson stores per-vertex density as
     # quality; drop the sparsest percentile.
     if args.density_trim_pct > 0:
         print(f"4/7 Trimming low-density Poisson bulges "
@@ -146,8 +146,8 @@ def main():
     dims = ms.current_mesh().bounding_box()
     print(f"\nCleaned mesh ready: {args.output}")
     print(f"  extent: {dims.dim_x():.2f} x {dims.dim_y():.2f} x "
-          f"{dims.dim_z():.2f} (reconstruction units — metric after stage 4)")
-    print("Next: 4_scale_registration/scale_to_metric.py")
+          f"{dims.dim_z():.2f} (reconstruction units — metric after stage 5)")
+    print("Next: 4_floor_detection/detect_floor.py")
 
 
 if __name__ == "__main__":

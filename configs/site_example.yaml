@@ -9,7 +9,7 @@ video: /data/mysite/walkthrough.mp4
 site_height_m: 3.20        # measured on-site with a tape (floor to ceiling/top)
 
 # Optional LiDAR reference. EVALUATION ONLY — not part of the deployment
-# pipeline. If set, 4_scale_registration can derive scale from it and
+# pipeline. If set, stages 4-5 can derive scale from it and
 # evaluation/ uses it as ground truth.
 lidar_ref: null            # e.g. /data/mysite/lidar/blk_arc_scan.ply
 
@@ -17,15 +17,15 @@ lidar_ref: null            # e.g. /data/mysite/lidar/blk_arc_scan.ply
 frames_dir: outputs/mysite/frames
 pointcloud: outputs/mysite/recon/mysite_pointcloud.ply
 mesh: outputs/mysite/recon/mysite_mesh.ply
-blend_scaled: outputs/mysite/scene/mysite.blend
-blend_floor: outputs/mysite/scene/mysite_floor.blend
+blend_leveled: outputs/mysite/scene/mysite_leveled.blend   # stage 4: floor at Z=0
+blend_scene: outputs/mysite/scene/mysite.blend             # stage 5: metric + StandableFloor
 
 # ---- stage 1: capture -------------------------------------------------------
 capture:
   num_frames: 50
   min_sharpness: 60.0      # variance-of-Laplacian threshold; below = blurry
 
-# ---- stage 5: floor detection -----------------------------------------------
+# ---- stage 4: floor detection / stage 5: StandableFloor ---------------------
 floor:
   crop_fraction: 0.3333    # bottom part of the Z-range searched for the floor
   tolerance_m: 0.10        # +/- inlier band around the RANSAC plane

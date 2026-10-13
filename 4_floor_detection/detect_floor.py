@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 """
-PASS stage 5 — floor detection + scene canonicalization.
+PASS stage 4 — floor detection + scene canonicalization.
 
 Runs INSIDE Blender (headless):
 
     blender --background --python detect_floor.py -- \
-        --blend scene/mysite.blend --output scene/mysite_floor.blend
+        --mesh recon/mysite_mesh.ply --site-height 3.2 \
+        --output scene/mysite_leveled.blend
+
+Takes the cleaned mesh from stage 3, levels it and puts the floor at Z = 0.
+Leveling comes BEFORE metric scaling (stage 5) because the scale factor is
+derived from the site height measured normal to the floor, which is only
+well defined once the scene is level.
 
 Pipeline (fully automatic, replaces the manual "floor at Z=0" step):
 
+  0. provisional scale : the mesh is still in reconstruction units, so the
+                 fixed metric thresholds below would be meaningless. A
+                 provisional factor H_target / (raw Z extent) brings it to
+                 approximately metric units. Stage 5 supersedes it with the
+                 exact factor measured normal to the floor.
   1. crop      : keep vertices in the bottom `--crop-fraction` of the Z range
                  (assumes the reconstruction is roughly upright, which holds
                  for DA3 outputs from handheld video)
@@ -22,13 +33,11 @@ Pipeline (fully automatic, replaces the manual "floor at Z=0" step):
   5. re-center : translate X/Y so the center of the floor footprint sits at
                  the origin (the site is centered around (0,0,0) for
                  BlendCon; Z is owned by the floor)
-  6. footprint : rasterize floor inliers into an occupancy grid
-                 (`--cell-size` m), morphologically erode by `--inset` m,
-                 and build the "StandableFloor" mesh at Z = 0 — the region
-                 where BlendCon may place workers and cameras
 
-Outputs the canonicalized .blend (scene mesh + StandableFloor object) and a
-JSON report with plane parameters, inlier counts and standable area.
+The floor inliers are stored on the mesh as the vertex group "FloorInliers"
+so that stage 5 can build the StandableFloor from exactly these points once
+the scene is metric. Outputs the leveled .blend and a JSON report with the
+plane parameters, corrected tilt, inlier counts and the provisional factor.
 """
 
 import argparse
@@ -42,6 +51,8 @@ import numpy as np
 from mathutils import Matrix, Vector
 
 FLOOR_OBJECT_NAME = "StandableFloor"
+FLOOR_GROUP_NAME = "FloorInliers"
+PROVISIONAL_SCALE_PROP = "pass_provisional_scale"
 
 
 # --------------------------------------------------------------------------- #
@@ -52,29 +63,64 @@ def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     p = argparse.ArgumentParser(prog="detect_floor.py", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--blend", required=True, type=Path,
-                   help="Metric .blend scene from stage 4")
+    p.add_argument("--mesh", required=True, type=Path,
+                   help="Cleaned mesh .ply from stage 3")
     p.add_argument("--output", required=True, type=Path,
-                   help="Canonicalized .blend to write")
-    p.add_argument("--object", default=None,
-                   help="Scene mesh object name (default: largest mesh)")
+                   help="Leveled .blend to write (floor at Z=0)")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--site-height", type=float,
+                     help="Measured site height in meters, used for the "
+                          "provisional scale (deployment)")
+    src.add_argument("--lidar-ref", type=Path,
+                     help="LiDAR reference mesh/cloud; its Z extent is the "
+                          "provisional target height (evaluation only)")
     p.add_argument("--crop-fraction", type=float, default=1.0 / 3.0,
                    help="Bottom fraction of the Z range searched for the "
                         "floor (default 1/3)")
     p.add_argument("--tolerance", type=float, default=0.10,
                    help="RANSAC inlier band around the plane, meters "
                         "(default 0.10 = +/-10 cm)")
-    p.add_argument("--inset", type=float, default=0.30,
-                   help="Inward inset of the standable area, meters "
-                        "(default 0.30)")
-    p.add_argument("--cell-size", type=float, default=0.10,
-                   help="Occupancy-grid cell size, meters (default 0.10)")
     p.add_argument("--iterations", type=int, default=2000,
                    help="RANSAC iterations (default 2000)")
     p.add_argument("--seed", type=int, default=0, help="RANSAC RNG seed")
     p.add_argument("--report", type=Path, default=None,
                    help="JSON report path (default: <output>.floor.json)")
     return p.parse_args(argv)
+
+
+def import_ply(path: Path):
+    """PLY import across Blender versions; returns the new object."""
+    before = set(bpy.data.objects)
+    if hasattr(bpy.ops.wm, "ply_import"):          # Blender >= 4.0
+        bpy.ops.wm.ply_import(filepath=str(path))
+    else:                                          # Blender 3.x
+        bpy.ops.import_mesh.ply(filepath=str(path))
+    new = set(bpy.data.objects) - before
+    if not new:
+        sys.exit(f"ERROR: import produced no object: {path}")
+    return new.pop()
+
+
+def add_vertex_color_material(obj):
+    """Attach a material that renders the mesh's vertex colors.
+
+    An imported PLY has no material, so Cycles/Eevee would render it plain
+    white even though the vertex colors are present — the colors must be
+    routed into a shader via a Color Attribute node."""
+    if not obj.data.color_attributes:
+        print("WARNING: mesh has no vertex colors — material not added")
+        return
+    attr_name = obj.data.color_attributes[0].name
+    mat = bpy.data.materials.new("PASS_VertexColor")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    bsdf = nodes["Principled BSDF"]
+    bsdf.inputs["Roughness"].default_value = 1.0     # matte site surfaces
+    vcol = nodes.new("ShaderNodeVertexColor")
+    vcol.layer_name = attr_name
+    mat.node_tree.links.new(bsdf.inputs["Base Color"], vcol.outputs["Color"])
+    obj.data.materials.append(mat)
+    print(f"Vertex-color material attached (attribute '{attr_name}')")
 
 
 def world_vertices(obj) -> np.ndarray:
@@ -140,107 +186,61 @@ def ransac_plane(points: np.ndarray, tolerance: float, iterations: int,
 
 
 # --------------------------------------------------------------------------- #
-# footprint: occupancy grid -> eroded -> mesh
-# --------------------------------------------------------------------------- #
-
-def _shift(grid: np.ndarray, dx: int, dy: int) -> np.ndarray:
-    """Grid shifted by (dx, dy), zero-padded (no scipy inside Blender)."""
-    shifted = np.zeros_like(grid)
-    xs = slice(max(dx, 0), grid.shape[0] + min(dx, 0))
-    xd = slice(max(-dx, 0), grid.shape[0] + min(-dx, 0))
-    ys = slice(max(dy, 0), grid.shape[1] + min(dy, 0))
-    yd = slice(max(-dy, 0), grid.shape[1] + min(-dy, 0))
-    shifted[xd, yd] = grid[xs, ys]
-    return shifted
-
-
-def binary_morph(grid: np.ndarray, radius_cells: int,
-                 op: str) -> np.ndarray:
-    """Square-structuring-element binary erosion/dilation via shifted
-    slicing."""
-    if radius_cells <= 0:
-        return grid
-    out = grid.copy()
-    for dx in range(-radius_cells, radius_cells + 1):
-        for dy in range(-radius_cells, radius_cells + 1):
-            if dx == 0 and dy == 0:
-                continue
-            if op == "erode":
-                out &= _shift(grid, dx, dy)
-            else:
-                out |= _shift(grid, dx, dy)
-    return out
-
-
-def build_floor_mesh(occupied: np.ndarray, origin_xy: np.ndarray,
-                     cell: float) -> bpy.types.Object:
-    """One quad per occupied cell at Z=0, shared vertices, as a new object."""
-    verts, faces = [], []
-    vidx = {}                        # (gx, gy) grid-node -> vertex index
-
-    def node(gx: int, gy: int) -> int:
-        key = (gx, gy)
-        if key not in vidx:
-            vidx[key] = len(verts)
-            verts.append((origin_xy[0] + gx * cell,
-                          origin_xy[1] + gy * cell, 0.0))
-        return vidx[key]
-
-    for gx, gy in zip(*np.nonzero(occupied)):
-        faces.append((node(gx, gy), node(gx + 1, gy),
-                      node(gx + 1, gy + 1), node(gx, gy + 1)))
-
-    mesh = bpy.data.meshes.new(FLOOR_OBJECT_NAME)
-    mesh.from_pydata(verts, [], faces)
-    mesh.update()
-    obj = bpy.data.objects.new(FLOOR_OBJECT_NAME, mesh)
-    bpy.context.scene.collection.objects.link(obj)
-    return obj
-
-
-# --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
 
 def main():
     args = parse_args()
-    if not args.blend.is_file():
-        sys.exit(f"ERROR: blend file not found: {args.blend}")
+    if not args.mesh.is_file():
+        sys.exit(f"ERROR: mesh not found: {args.mesh}")
     rng = np.random.default_rng(args.seed)
 
-    bpy.ops.wm.open_mainfile(filepath=str(args.blend.resolve()))
-
-    # Target mesh: named, or the mesh with the most vertices.
-    meshes = [o for o in bpy.data.objects if o.type == "MESH"
-              and o.name != FLOOR_OBJECT_NAME]
-    if args.object:
-        obj = bpy.data.objects.get(args.object)
-        if obj is None or obj.type != "MESH":
-            sys.exit(f"ERROR: mesh object not found: {args.object}")
-    else:
-        if not meshes:
-            sys.exit("ERROR: no mesh objects in the scene")
-        obj = max(meshes, key=lambda o: len(o.data.vertices))
+    # Fresh empty scene; import the cleaned mesh and make its colors render.
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    print(f"Importing {args.mesh} ...")
+    obj = import_ply(args.mesh)
+    obj.name = args.mesh.stem
+    add_vertex_color_material(obj)
     print(f"Scene mesh: '{obj.name}' ({len(obj.data.vertices):,} verts)")
 
-    # Stale floor from a previous run would corrupt the crop — remove it.
-    old = bpy.data.objects.get(FLOOR_OBJECT_NAME)
-    if old:
-        bpy.data.objects.remove(old, do_unlink=True)
+    # ---- 0. provisional scale ---------------------------------------------
+    pts = world_vertices(obj)
+    raw_extent = float(pts[:, 2].max() - pts[:, 2].min())
+    if raw_extent <= 0 or not math.isfinite(raw_extent):
+        sys.exit("ERROR: mesh has zero/invalid Z extent")
+    if args.site_height is not None:
+        target_h, source = args.site_height, "measured site height"
+        if target_h <= 0:
+            sys.exit("ERROR: --site-height must be positive (meters)")
+    else:
+        if not args.lidar_ref.is_file():
+            sys.exit(f"ERROR: LiDAR reference not found: {args.lidar_ref}")
+        print(f"Importing LiDAR reference {args.lidar_ref} ...")
+        lidar = import_ply(args.lidar_ref)
+        lz = world_vertices(lidar)[:, 2]
+        target_h, source = float(lz.max() - lz.min()), "LiDAR reference Z extent"
+        bpy.data.objects.remove(lidar, do_unlink=True)   # measured, never kept
+    provisional = target_h / raw_extent
+    obj.matrix_world = Matrix.Scale(provisional, 4) @ obj.matrix_world
+    apply_object_transform(obj)
+    obj[PROVISIONAL_SCALE_PROP] = provisional
+    print(f"0/5 Provisional scale {provisional:.6f} "
+          f"(raw Z extent {raw_extent:.4f} -> {target_h:.4f} m, {source}); "
+          f"superseded by stage 5")
 
     # ---- 1. bottom crop ----------------------------------------------------
     pts = world_vertices(obj)
     z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
     z_cut = z_min + (z_max - z_min) * args.crop_fraction
     crop = pts[pts[:, 2] <= z_cut]
-    print(f"1/6 Bottom crop: {len(crop):,} / {len(pts):,} verts "
+    print(f"1/5 Bottom crop: {len(crop):,} / {len(pts):,} verts "
           f"(z <= {z_cut:.3f})")
 
     # ---- 2. RANSAC ----------------------------------------------------------
     normal, d, crop_inliers = ransac_plane(crop, args.tolerance,
                                            args.iterations, rng)
     tilt_deg = math.degrees(math.acos(min(1.0, abs(normal[2]))))
-    print(f"2/6 RANSAC floor plane: n=({normal[0]:.4f}, {normal[1]:.4f}, "
+    print(f"2/5 RANSAC floor plane: n=({normal[0]:.4f}, {normal[1]:.4f}, "
           f"{normal[2]:.4f}), d={d:.4f} | {int(crop_inliers.sum()):,} inliers"
           f" | tilt {tilt_deg:.2f} deg")
 
@@ -248,23 +248,24 @@ def main():
     rot = Vector(normal).rotation_difference(Vector((0, 0, 1))).to_matrix()
     obj.matrix_world = Matrix(rot.to_4x4()) @ obj.matrix_world
     apply_object_transform(obj)
-    print("3/6 Levelled (floor normal aligned to +Z)")
+    print("3/5 Levelled (floor normal aligned to +Z)")
 
     # ---- 4. floor to Z=0 ------------------------------------------------------
     pts = world_vertices(obj)
     z_cut = pts[:, 2].min() + (pts[:, 2].max() - pts[:, 2].min()) * args.crop_fraction
-    crop = pts[pts[:, 2] <= z_cut]
-    n2, d2, inl2 = ransac_plane(crop, args.tolerance, args.iterations, rng)
-    floor_z = float(crop[inl2][:, 2].mean())
+    crop_idx = np.nonzero(pts[:, 2] <= z_cut)[0]
+    n2, d2, inl2 = ransac_plane(pts[crop_idx], args.tolerance, args.iterations, rng)
+    floor_z = float(pts[crop_idx][inl2][:, 2].mean())
     obj.matrix_world = Matrix.Translation((0, 0, -floor_z)) @ obj.matrix_world
     apply_object_transform(obj)
-    print(f"4/6 Floor plane dropped to Z=0 (was at Z={floor_z:.4f})")
+    print(f"4/5 Floor plane dropped to Z=0 (was at Z={floor_z:.4f})")
 
     # ---- 5. XY re-center ----------------------------------------------------
     # Center the FLOOR footprint (not the whole-mesh bbox, which walls or
     # ceiling overhangs could skew) on the origin; Z stays owned by the floor.
+    floor_idx = crop_idx[inl2]
     pts = world_vertices(obj)
-    floor_pts = pts[np.abs(pts[:, 2]) <= args.tolerance]
+    floor_pts = pts[floor_idx]
     if len(floor_pts) < 3:
         sys.exit("ERROR: no floor inliers after leveling")
     center_xy = (floor_pts[:, :2].min(axis=0)
@@ -272,64 +273,41 @@ def main():
     obj.matrix_world = (Matrix.Translation((-center_xy[0], -center_xy[1], 0))
                         @ obj.matrix_world)
     apply_object_transform(obj)
-    print(f"5/6 Re-centered: floor footprint center moved from "
+    print(f"5/5 Re-centered: floor footprint center moved from "
           f"({center_xy[0]:.3f}, {center_xy[1]:.3f}) to (0, 0)")
 
-    # ---- 6. StandableFloor -------------------------------------------------
-    pts = world_vertices(obj)
-    floor_pts = pts[np.abs(pts[:, 2]) <= args.tolerance]
-    if len(floor_pts) < 3:
-        sys.exit("ERROR: no floor inliers after canonicalization")
-
-    cell = args.cell_size
-    origin_xy = np.floor(floor_pts[:, :2].min(axis=0) / cell) * cell
-    idx = np.floor((floor_pts[:, :2] - origin_xy) / cell).astype(int)
-    grid = np.zeros(idx.max(axis=0) + 1, dtype=bool)
-    grid[idx[:, 0], idx[:, 1]] = True
-
-    # 1-cell dilation (morphological closing) bridges point-sampling gaps in
-    # the raster; the erosion radius grows by the same 1 cell so the net
-    # inset is preserved.
-    closed = binary_morph(grid, 1, "dilate")
-    radius = max(1, int(math.ceil(args.inset / cell))) + 1
-    eroded = binary_morph(closed, radius, "erode")
-    if not eroded.any():
-        sys.exit(f"ERROR: standable area empty after {args.inset} m inset — "
-                 f"reduce --inset or check the reconstruction scale")
-
-    floor_obj = build_floor_mesh(eroded, origin_xy, cell)
-    area = float(eroded.sum()) * cell * cell
-    print(f"6/6 StandableFloor: {int(eroded.sum())} cells "
-          f"({area:.2f} m^2 after {args.inset} m inset)")
+    # Remember the floor inliers for stage 5 (StandableFloor extraction).
+    group = obj.vertex_groups.new(name=FLOOR_GROUP_NAME)
+    group.add([int(i) for i in floor_idx], 1.0, "REPLACE")
 
     # ---- save ---------------------------------------------------------------
     args.output.parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=str(args.output.resolve()))
-    print(f"\nCanonicalized scene saved: {args.output}")
+    print(f"\nLeveled scene saved: {args.output}")
 
     report_path = args.report or args.output.with_suffix(".floor.json")
     report_path.write_text(json.dumps({
-        "input": str(args.blend),
+        "mesh": str(args.mesh),
         "scene_object": obj.name,
-        "floor_object": floor_obj.name,
+        "floor_vertex_group": FLOOR_GROUP_NAME,
+        "provisional_scale": {
+            "source": source,
+            "target_height_m": target_h,
+            "raw_z_extent": round(raw_extent, 6),
+            "factor": provisional,
+        },
         "ransac": {
             "normal_before_leveling": [round(float(x), 6) for x in normal],
             "tilt_corrected_deg": round(tilt_deg, 3),
-            "inliers": int(crop_inliers.sum()),
-            "crop_points": int(len(crop)),
+            "inliers": int(len(floor_idx)),
+            "crop_points": int(len(crop_idx)),
             "tolerance_m": args.tolerance,
             "iterations": args.iterations,
             "seed": args.seed,
         },
-        "standable_floor": {
-            "cells": int(eroded.sum()),
-            "cell_size_m": cell,
-            "inset_m": args.inset,
-            "area_m2": round(area, 3),
-        },
     }, indent=2) + "\n")
     print(f"Report: {report_path}")
-    print("Next: 6_blendcon (synthetic data generation)")
+    print("Next: 5_scale_registration/scale_to_metric.py")
 
 
 if __name__ == "__main__":

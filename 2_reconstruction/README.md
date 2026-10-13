@@ -16,7 +16,7 @@ which backend produced the cloud:
 The DA3 wrapper additionally guarantees **Z-up orientation**: DA3's GLB
 export uses the glTF convention (Y-up, oriented by the first camera), and the
 wrapper rotates it to Z-up on extraction — residual tilt from the phone's
-pitch is corrected by stage 5's RANSAC leveling.
+pitch is corrected by stage 4's RANSAC leveling.
 
 ## Deployment: Depth Anything 3
 

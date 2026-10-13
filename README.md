@@ -22,11 +22,11 @@ Image-based 3D reconstruction (Depth Anything 3)
 Point-cloud cleaning + Screened-Poisson meshing (PyMeshLab)
         │  3_postprocess        watertight colored mesh, corner at (0,0,0)
         ▼
-Metric scale recovery (one on-site tape measurement)
-        │  4_scale_registration metric .blend scene
-        ▼
 Floor detection + scene canonicalization (RANSAC, headless Blender)
-        │  5_floor_detection    floor levelled to Z=0 + StandableFloor mesh
+        │  4_floor_detection    levelled .blend scene, floor at Z=0
+        ▼
+Metric scale recovery (one on-site tape measurement) + StandableFloor
+        │  5_scale_registration metric .blend scene + StandableFloor mesh
         ▼
 Synthetic image generation (modified BlendCon)
         │  6_blendcon           rendered images + labels
@@ -42,8 +42,8 @@ YOLO dataset assembly + detector training
 | 1 | [`1_capture/`](1_capture/) | Video → N sharpest, uniformly spread frames (blur-aware sampling) |
 | 2 | [`2_reconstruction/`](2_reconstruction/) | Frames → colored point cloud. **Depth Anything 3 is the deployment method**; VGGT and π³ wrappers are provided for the paper's evaluation comparison only |
 | 3 | [`3_postprocess/`](3_postprocess/) | Outlier removal → normals → Screened Poisson → colored mesh with bbox corner at the origin |
-| 4 | [`4_scale_registration/`](4_scale_registration/) | Scale the mesh to metric units from a measured site height (or a LiDAR reference, evaluation only) and save as `.blend` |
-| 5 | [`5_floor_detection/`](5_floor_detection/) | RANSAC floor plane → level scene, floor at Z=0 → inset → `StandableFloor` object |
+| 4 | [`4_floor_detection/`](4_floor_detection/) | RANSAC floor plane → level scene, floor at Z=0, floor footprint centred on the origin (provisional scale from the measured height so metric thresholds apply) |
+| 5 | [`5_scale_registration/`](5_scale_registration/) | Scale the levelled mesh to metric units from the measured site height (or a LiDAR reference, evaluation only), then inset the floor inliers into the `StandableFloor` object |
 | 6 | [`6_blendcon/`](6_blendcon/) | Our camera-placement patch for [BlendCon](https://github.com/Ali-Tohidifar/BlendCon) (patch + apply script, upstream not vendored) |
 | 7 | [`7_detection/`](7_detection/) | BlendCon output → per-scenario 2D labels + merged YOLO dataset with a single `dataset.yaml` |
 | — | [`evaluation/`](evaluation/) | **Study only, not part of the pipeline.** Mesh-vs-LiDAR alignment and Accuracy / Completeness / Chamfer / Normal-Consistency / F-score metrics |
@@ -92,13 +92,14 @@ python 2_reconstruction/run_da3.py --input frames/ --output-dir recon/ --site-na
 # 3. clean + mesh
 python 3_postprocess/clean_and_mesh.py --input recon/mysite_pointcloud.ply --output recon/mysite_mesh.ply
 
-# 4. metric scale (site height measured on-site with a tape, e.g. 3.2 m)
-blender --background --python 4_scale_registration/scale_to_metric.py -- \
-    --mesh recon/mysite_mesh.ply --site-height 3.2 --output scene/mysite.blend
+# 4. floor detection + canonicalization (the measured site height, e.g. 3.2 m,
+#    sets a provisional scale so the metric thresholds apply)
+blender --background --python 4_floor_detection/detect_floor.py -- \
+    --mesh recon/mysite_mesh.ply --site-height 3.2 --output scene/mysite_leveled.blend
 
-# 5. floor detection + canonicalization
-blender --background --python 5_floor_detection/detect_floor.py -- \
-    --blend scene/mysite.blend --output scene/mysite_floor.blend
+# 5. metric scale (height above the levelled floor) + StandableFloor
+blender --background --python 5_scale_registration/scale_to_metric.py -- \
+    --blend scene/mysite_leveled.blend --site-height 3.2 --output scene/mysite.blend
 
 # 6. synthetic data generation (patched BlendCon; see 6_blendcon/README.md)
 cd 6_blendcon && ./apply_patch.sh && cd BlendCon && blender --background --python DataGenerator.py
